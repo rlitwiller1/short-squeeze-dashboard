@@ -1,0 +1,81 @@
+
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
+
+st.set_page_config(page_title="Short Squeeze Dashboard", layout="wide")
+st.title("📈 Live Short Squeeze Opportunities Dashboard")
+
+REFRESH_INTERVAL = 10  # minutes
+st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (refreshes every {REFRESH_INTERVAL} min)")
+
+@st.cache_data(ttl=REFRESH_INTERVAL * 60)
+def get_finviz_tickers():
+    url = "https://finviz.com/screener.ashx?v=111&f=sh_short_o20&o=-shortinterest"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    r = requests.get(url, headers=headers)
+    soup = BeautifulSoup(r.content, 'lxml')
+    tickers = []
+    for row in soup.select("table.table-light tr[valign=top]"):
+        cells = row.find_all("td")
+        if len(cells) >= 2:
+            tickers.append(cells[1].text.strip())
+    return tickers[:50]
+
+@st.cache_data(ttl=REFRESH_INTERVAL * 60)
+def fetch_metrics(tickers):
+    data = []
+    for ticker in tickers:
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            hist = stock.history(period="7d")
+
+            price = info.get("regularMarketPrice", 0)
+            float_shares = info.get("floatShares", 0)
+            shares_short = info.get("sharesShort", 0)
+            short_ratio = info.get("shortRatio", 0)
+
+            if float_shares == 0:
+                continue
+
+            short_percent = (shares_short / float_shares) * 100
+            vol_today = info.get("volume", 1)
+            avg_vol = info.get("averageVolume", 1)
+            rel_vol = vol_today / avg_vol if avg_vol else 1
+            price_change_5d = ((hist["Close"][-1] - hist["Close"][0]) / hist["Close"][0]) * 100 if len(hist) >= 5 else 0
+
+            signal_score = (
+                short_percent * 0.4 +
+                short_ratio * 0.2 +
+                price_change_5d * 0.2 +
+                rel_vol * 10 * 0.2
+            )
+
+            data.append({
+                "Ticker": ticker,
+                "Price": round(price, 2),
+                "% Float Short": round(short_percent, 2),
+                "Days to Cover": round(short_ratio, 2),
+                "Float (M)": round(float_shares / 1e6, 1),
+                "5D % Change": round(price_change_5d, 2),
+                "Rel Volume": round(rel_vol, 2),
+                "Signal Score": round(signal_score, 2),
+            })
+
+        except Exception as e:
+            print(f"Error fetching {ticker}: {e}")
+            continue
+
+    df = pd.DataFrame(data)
+    df = df.sort_values("Signal Score", ascending=False)
+    return df
+
+tickers = get_finviz_tickers()
+results_df = fetch_metrics(tickers)
+st.dataframe(results_df, use_container_width=True)
+st.subheader("Top 5 Candidates")
+st.bar_chart(results_df.set_index("Ticker")["Signal Score"].head(5))
