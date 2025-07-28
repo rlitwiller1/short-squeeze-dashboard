@@ -1,0 +1,63 @@
+
+import streamlit as st
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+
+@st.cache_data
+def get_finviz_data():
+    url = "https://finviz.com/screener.ashx?v=111&s=ta_topgainers&f=sh_float_u50,sh_short_o20&ft=4"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, headers=headers)
+    soup = BeautifulSoup(r.content, "html.parser")
+    tables = soup.find_all("table", class_="table-light")
+    if len(tables) < 2:
+        st.warning("Could not retrieve stock data from Finviz.")
+        return []
+
+    rows = tables[1].find_all("tr")[1:]
+    tickers = []
+    for row in rows:
+        cols = row.find_all("td")
+        if len(cols) > 1:
+            tickers.append(cols[1].text.strip())
+    return tickers
+
+@st.cache_data
+def fetch_metrics(tickers):
+    base_url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols="
+    data = []
+    for ticker in tickers:
+        r = requests.get(base_url + ticker)
+        try:
+            quote = r.json()["quoteResponse"]["result"][0]
+            data.append({
+                "Ticker": ticker,
+                "Price": quote.get("regularMarketPrice"),
+                "Change %": quote.get("regularMarketChangePercent"),
+                "Volume": quote.get("regularMarketVolume"),
+                "Market Cap": quote.get("marketCap"),
+            })
+        except (IndexError, KeyError):
+            continue
+    df = pd.DataFrame(data)
+    if "Price" in df.columns:
+        df["Signal Score"] = (
+            df["Change %"].fillna(0) * 2 +
+            df["Volume"].fillna(0).rank(pct=True) +
+            df["Market Cap"].fillna(0).rank(pct=True)
+        )
+        df = df.sort_values("Signal Score", ascending=False)
+    return df
+
+st.set_page_config(page_title="Short Squeeze Dashboard", layout="wide")
+st.title("📈 Short Squeeze Opportunity Dashboard")
+
+st.info("Scanning Finviz top gainers with high short interest and low float...")
+
+tickers = get_finviz_data()
+if tickers:
+    results_df = fetch_metrics(tickers)
+    st.dataframe(results_df, use_container_width=True)
+else:
+    st.error("No data found. Finviz may have blocked scraping or changed its layout.")
